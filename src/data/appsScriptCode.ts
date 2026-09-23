@@ -3,39 +3,59 @@ export const APPS_SCRIPT_CODE_GS = `/**
  * SK-CC วิ่งให้ FUN 2026 - ระบบเชื่อมต่อ Google Sheets & Google Drive
  * วิทยาลัยชุมชนสงขลา (Songkhla Community College)
  * =========================================================================
- * รองรับ:
- * 1. บันทึกข้อมูลการสมัครลง Google Sheets
- * 2. อัปโหลดไฟล์สลิปโอนเงินเข้า Google Drive ในโฟลเดอร์เฉพาะอัตโนมัติ
- * 3. บันทึก URL ไฟล์ภาพสลิปลงใน Google Sheets เพื่อกดเปิดดูได้ทันที
- * 4. API สำหรับตรวจสอบสถานะการเชื่อมต่อ (Ping/Health Check)
- * 5. อัปเดตสถานะการตรวจสอบ (ตรวจสอบแล้ว / ยังไม่ตรวจสอบ)
+ * ฟังก์ชันหลัก:
+ * 1. บันทึกข้อมูลการสมัครลง Google Sheets (19 คอลัมน์)
+ * 2. แก้ไข (Update) และ ลบ (Delete) ข้อมูลผู้สมัครในชีต
+ * 3. อัปเดตสถานะการตรวจสอบ (ตรวจสอบแล้ว / ยังไม่ตรวจสอบ)
+ * 4. ซิงค์ตัวเลือกและบันทึกการตั้งค่าฟอร์ม (Form Options & Config) ลงชีต 'Config_2026'
+ * 5. อัปโหลดไฟล์สลิปโอนเงินเข้า Google Drive 'SKCC_FunRun_2026_Slips' อัตโนมัติ
+ * 6. ส่งกลับ URL ของ Google Sheets เพื่อกดเปิดจากระบบได้ทันที
  */
 
-// ชื่อแผ่นงาน (Sheet Name) และชื่อโฟลเดอร์ใน Google Drive
+// ชื่อแผ่นงานหลัก (Registrations) แผ่นงานตั้งค่า (Config) และโฟลเดอร์ Google Drive
 const SHEET_NAME = 'Registrations_2026';
+const CONFIG_SHEET_NAME = 'Config_2026';
 const DRIVE_FOLDER_NAME = 'SKCC_FunRun_2026_Slips';
 
 /**
- * Handle GET Requests (Health check / Read records)
+ * Handle GET Requests
  */
 function doGet(e) {
   try {
     const action = e && e.parameter ? e.parameter.action : '';
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const spreadsheetUrl = ss.getUrl();
     
+    // 1. Ping / Health check
     if (action === 'ping') {
       return jsonResponse({
         status: 'success',
         connected: true,
         timestamp: new Date().toISOString(),
+        spreadsheetUrl: spreadsheetUrl,
+        sheetName: SHEET_NAME,
+        configSheetName: CONFIG_SHEET_NAME,
         message: 'เชื่อมต่อ Google Apps Script และ Google Sheets สำเร็จ'
       });
     }
 
+    // 2. ดึงข้อมูลการตั้งค่าฟอร์มและตัวเลือกทั้งหมดจากชีต Config_2026
+    if (action === 'getFormConfig') {
+      const config = readConfigFromSheet();
+      return jsonResponse({
+        status: 'success',
+        data: config,
+        spreadsheetUrl: spreadsheetUrl,
+        message: 'ดึงข้อมูลตัวเลือกจาก Google Sheets สำเร็จ'
+      });
+    }
+
+    // 3. ดึงรายชื่อผู้สมัครทั้งหมด
     if (action === 'getRegistrations') {
       const sheet = getOrCreateSheet();
       const data = sheet.getDataRange().getValues();
       if (data.length <= 1) {
-        return jsonResponse({ status: 'success', data: [] });
+        return jsonResponse({ status: 'success', data: [], spreadsheetUrl: spreadsheetUrl });
       }
       
       const headers = data[0];
@@ -46,12 +66,12 @@ function doGet(e) {
         });
         return obj;
       });
-      return jsonResponse({ status: 'success', data: rows });
+      return jsonResponse({ status: 'success', data: rows, spreadsheetUrl: spreadsheetUrl });
     }
 
-    // Default Web page view: Render Index.html
+    // 4. Default Web Page View (index.html)
     try {
-      return HtmlService.createTemplateFromFile('Index')
+      return HtmlService.createTemplateFromFile('index')
         .evaluate()
         .setTitle('SK-CC วิ่งให้ FUN 2026 - Data Bridge')
         .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL)
@@ -61,6 +81,7 @@ function doGet(e) {
         status: 'success',
         connected: true,
         timestamp: new Date().toISOString(),
+        spreadsheetUrl: spreadsheetUrl,
         message: 'Google Apps Script Web App พร้อมใช้งาน'
       });
     }
@@ -70,34 +91,60 @@ function doGet(e) {
 }
 
 /**
- * Handle POST Requests (Create registration / Upload slip / Update status)
+ * Handle POST Requests
  */
 function doPost(e) {
   try {
     const payload = JSON.parse(e.postData.contents);
     const action = payload.action || 'addRegistration';
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const spreadsheetUrl = ss.getUrl();
 
+    // 1. ทดสอบการเชื่อมต่อ
     if (action === 'testConnection') {
       return jsonResponse({
         status: 'success',
         connected: true,
         timestamp: new Date().toISOString(),
         sheetName: SHEET_NAME,
+        spreadsheetUrl: spreadsheetUrl,
         message: 'เชื่อมต่อ Google Sheets และ Google Drive พร้อมใช้งาน'
       });
     }
 
+    // 2. ดึงการตั้งค่าฟอร์มและตัวเลือก
+    if (action === 'getFormConfig') {
+      const config = readConfigFromSheet();
+      return jsonResponse({
+        status: 'success',
+        data: config,
+        spreadsheetUrl: spreadsheetUrl
+      });
+    }
+
+    // 3. บันทึกและอัปเดตการตั้งค่าฟอร์ม / ตัวเลือกทั้งหมดลงใน Google Sheets
+    if (action === 'saveFormConfig') {
+      const configData = payload.data;
+      writeConfigToSheet(configData);
+      return jsonResponse({
+        status: 'success',
+        message: 'บันทึกและอัปเดตการตั้งค่าฟอร์มลง Google Sheets สำเร็จ',
+        spreadsheetUrl: spreadsheetUrl
+      });
+    }
+
+    // 4. เพิ่มผู้สมัครใหม่ (Add Registration)
     if (action === 'addRegistration') {
       const reg = payload.data;
       const sheet = getOrCreateSheet();
 
-      // บันทึกไฟล์ภาพสลิปโอนเงินเข้า Google Drive
-      let slipUrl = reg.slipImage || '';
+      // บันทึกสลิปโอนเงินเข้า Google Drive
+      let slipUrl = reg.driveFileUrl || reg.slipImage || '';
       if (reg.slipBase64 && reg.slipBase64.startsWith('data:image')) {
         slipUrl = uploadSlipToDrive(reg.id, reg.fullName, reg.slipBase64);
       }
 
-      // สร้างที่อยู่รวมกรณีจัดส่งทางไปรษณีย์
+      // สร้างที่อยู่รวม
       let fullAddress = 'รับด้วยตัวเอง ณ วิทยาลัยชุมชนสงขลา';
       if (reg.deliveryType === 'postal' && reg.address) {
         const a = reg.address;
@@ -114,14 +161,6 @@ function doPost(e) {
           a.note ? '(หมายเหตุ: ' + a.note + ')' : ''
         ].filter(Boolean).join(' ');
       }
-
-      // ข้อมูลการศึกษา (กรณีเป็นนักศึกษา)
-      const studentInfo = [
-        reg.studentYear ? 'รหัส ' + reg.studentYear : '',
-        reg.studentRoom ? 'ห้อง ' + reg.studentRoom : '',
-        reg.studentMajor || '',
-        reg.learningLocation || ''
-      ].filter(Boolean).join(' | ');
 
       const row = [
         reg.id,                                // A: รหัสการสมัคร
@@ -149,30 +188,14 @@ function doPost(e) {
 
       return jsonResponse({
         status: 'success',
-        message: 'บันทึกข้อมูลเรียบร้อยแล้ว',
+        message: 'บันทึกข้อมูลการสมัครลง Google Sheets สำเร็จ',
         id: reg.id,
-        driveSlipUrl: slipUrl
+        driveSlipUrl: slipUrl,
+        spreadsheetUrl: spreadsheetUrl
       });
     }
 
-    if (action === 'updateStatus') {
-      const { id, status } = payload;
-      const sheet = getOrCreateSheet();
-      const data = sheet.getDataRange().getValues();
-      
-      for (let i = 1; i < data.length; i++) {
-        if (data[i][0] === id) {
-          // Column 18 (R) is status (1-based index 18)
-          sheet.getRange(i + 1, 18).setValue(status);
-          return jsonResponse({
-            status: 'success',
-            message: 'อัปเดตสถานะสำเร็จ'
-          });
-        }
-      }
-      return jsonResponse({ status: 'error', message: 'Registration not found' });
-    }
-
+    // 5. แก้ไขข้อมูลผู้สมัครทุกช่อง (Update Registration)
     if (action === 'updateRegistration') {
       const reg = payload.data;
       const sheet = getOrCreateSheet();
@@ -228,11 +251,50 @@ function doPost(e) {
           return jsonResponse({
             status: 'success',
             message: 'อัปเดตข้อมูลผู้สมัครใน Google Sheets เรียบร้อยแล้ว',
-            driveSlipUrl: slipUrl
+            driveSlipUrl: slipUrl,
+            spreadsheetUrl: spreadsheetUrl
           });
         }
       }
-      return jsonResponse({ status: 'error', message: 'Registration not found' });
+      return jsonResponse({ status: 'error', message: 'ไม่พบรหัสผู้สมัครในระบบ' });
+    }
+
+    // 6. ลบข้อมูลผู้สมัคร (Delete Registration)
+    if (action === 'deleteRegistration') {
+      const regId = payload.id;
+      const sheet = getOrCreateSheet();
+      const data = sheet.getDataRange().getValues();
+
+      for (let i = 1; i < data.length; i++) {
+        if (data[i][0] === regId) {
+          sheet.deleteRow(i + 1);
+          return jsonResponse({
+            status: 'success',
+            message: 'ลบข้อมูลผู้สมัครออกจาก Google Sheets เรียบร้อยแล้ว',
+            spreadsheetUrl: spreadsheetUrl
+          });
+        }
+      }
+      return jsonResponse({ status: 'error', message: 'ไม่พบรหัสผู้สมัครที่จะลบ' });
+    }
+
+    // 7. อัปเดตเฉพาะสถานะการตรวจสอบ (Update Status)
+    if (action === 'updateStatus') {
+      const { id, status } = payload;
+      const sheet = getOrCreateSheet();
+      const data = sheet.getDataRange().getValues();
+      
+      for (let i = 1; i < data.length; i++) {
+        if (data[i][0] === id) {
+          sheet.getRange(i + 1, 18).setValue(status);
+          return jsonResponse({
+            status: 'success',
+            message: 'อัปเดตสถานะใน Google Sheets สำเร็จ',
+            spreadsheetUrl: spreadsheetUrl
+          });
+        }
+      }
+      return jsonResponse({ status: 'error', message: 'ไม่พบรหัสผู้สมัคร' });
     }
 
     return jsonResponse({ status: 'error', message: 'Invalid action' });
@@ -242,24 +304,74 @@ function doPost(e) {
 }
 
 /**
- * ฟังก์ชันสร้างหรือดึงโฟลเดอร์ Google Drive และบันทึกไฟล์สลิป
+ * ฟังก์ชันบันทึกการตั้งค่าฟอร์มและตัวเลือกลงชีต Config_2026
+ */
+function writeConfigToSheet(configObj) {
+  if (!configObj) return;
+  const sheet = getOrCreateConfigSheet();
+  const jsonStr = JSON.stringify(configObj);
+  sheet.getRange(2, 1).setValue('FORM_CONFIG_JSON');
+  sheet.getRange(2, 2).setValue(jsonStr);
+  sheet.getRange(2, 3).setValue(new Date().toLocaleString('th-TH'));
+}
+
+/**
+ * ฟังก์ชันอ่านการตั้งค่าฟอร์มและตัวเลือกจากชีต Config_2026
+ */
+function readConfigFromSheet() {
+  const sheet = getOrCreateConfigSheet();
+  const data = sheet.getDataRange().getValues();
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][0] === 'FORM_CONFIG_JSON' && data[i][1]) {
+      try {
+        return JSON.parse(data[i][1]);
+      } catch (err) {
+        Logger.log('Config parse error: ' + err.toString());
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * ฟังก์ชันสร้างหรือดึงโฟลเดอร์ Google Drive สำหรับเก็บสลิป
+ */
+function getOrCreateDriveFolder() {
+  const folders = DriveApp.getFoldersByName(DRIVE_FOLDER_NAME);
+  if (folders.hasNext()) {
+    return folders.next();
+  }
+  const folder = DriveApp.createFolder(DRIVE_FOLDER_NAME);
+  folder.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  return folder;
+}
+
+/**
+ * ฟังก์ชันสำหรับกดรันครั้งแรกใน Apps Script (เลือกฟังก์ชัน initSheetDatabase แล้วกด Run)
+ * เพื่อสร้างชีต Registrations_2026, ชีต Config_2026 และโฟลเดอร์ Google Drive ทันที
+ */
+function initSheetDatabase() {
+  const regSheet = getOrCreateSheet();
+  const cfgSheet = getOrCreateConfigSheet();
+  const folder = getOrCreateDriveFolder();
+  SpreadsheetApp.getActiveSpreadsheet().toast('สร้างตารางผู้สมัคร ตารางตัวเลือก และโฟลเดอร์สลิป Drive สำเร็จ!', 'SK-CC 2026', 8);
+  Logger.log('Initialized sheets: ' + regSheet.getName() + ', ' + cfgSheet.getName() + ' and folder: ' + folder.getName());
+  return 'Database initialized successfully!';
+}
+
+/**
+ * ฟังก์ชันบันทึกไฟล์สลิปโอนเงินเข้า Google Drive
  */
 function uploadSlipToDrive(regId, fullName, base64Data) {
   try {
-    let folder;
-    const folders = DriveApp.getFoldersByName(DRIVE_FOLDER_NAME);
-    if (folders.hasNext()) {
-      folder = folders.next();
-    } else {
-      folder = DriveApp.createFolder(DRIVE_FOLDER_NAME);
-      folder.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-    }
+    if (!base64Data || !base64Data.startsWith('data:image')) return '';
+    const folder = getOrCreateDriveFolder();
 
     // แปลง Base64 เป็น Blob
     const parts = base64Data.split(';base64,');
     const contentType = parts[0].replace('data:', '');
     const decoded = Utilities.base64Decode(parts[1]);
-    const cleanName = fullName.replace(/[\\/:*?"<>|]/g, '_');
+    const cleanName = (fullName || 'runner').replace(/[\\/:*?"<>|]/g, '_');
     const fileName = 'Slip_' + regId + '_' + cleanName + '.jpg';
 
     const blob = Utilities.newBlob(decoded, contentType, fileName);
@@ -274,7 +386,7 @@ function uploadSlipToDrive(regId, fullName, base64Data) {
 }
 
 /**
- * ฟังก์ชันสร้าง Sheet และใส่ Header สีน้ำเงิน #0F4E7A สวยงาม
+ * ฟังก์ชันสร้าง Sheet รายชื่อผู้สมัคร (19 คอลัมน์ สีกรมท่า #0F4E7A)
  */
 function getOrCreateSheet() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -316,6 +428,27 @@ function getOrCreateSheet() {
   return sheet;
 }
 
+/**
+ * ฟังก์ชันสร้าง Sheet ตั้งค่าฟอร์มและตัวเลือก (Config_2026)
+ */
+function getOrCreateConfigSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(CONFIG_SHEET_NAME);
+  
+  if (!sheet) {
+    sheet = ss.insertSheet(CONFIG_SHEET_NAME);
+    const headers = ['Config_Key', 'Config_Value_JSON', 'Updated_At'];
+    sheet.appendRow(headers);
+    const headerRange = sheet.getRange(1, 1, 1, headers.length);
+    headerRange.setBackground('#EDBA48');
+    headerRange.setFontColor('#0F4E7A');
+    headerRange.setFontWeight('bold');
+    sheet.setFrozenRows(1);
+    sheet.autoResizeColumns(1, headers.length);
+  }
+  return sheet;
+}
+
 function jsonResponse(obj) {
   return ContentService.createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
@@ -340,7 +473,7 @@ export const APPS_SCRIPT_INDEX_HTML = `<!DOCTYPE html>
         background: white;
         border-radius: 16px;
         padding: 32px;
-        max-width: 540px;
+        max-width: 580px;
         margin: 0 auto;
         box-shadow: 0 10px 25px rgba(15, 78, 122, 0.1);
         border: 2px solid #EDBA48;
@@ -358,31 +491,52 @@ export const APPS_SCRIPT_INDEX_HTML = `<!DOCTYPE html>
         margin: 16px 0;
         border: 1px solid #a7f3d0;
       }
+      .features {
+        text-align: left;
+        background: #f8fafc;
+        padding: 16px 20px;
+        border-radius: 12px;
+        margin: 20px 0;
+        font-size: 13px;
+        color: #334155;
+        border: 1px solid #e2e8f0;
+      }
+      .features li { margin-bottom: 6px; }
       .btn {
         background: #0F4E7A;
         color: white;
         border: none;
-        padding: 10px 24px;
-        border-radius: 8px;
+        padding: 12px 26px;
+        border-radius: 10px;
         font-size: 15px;
         cursor: pointer;
-        font-weight: 500;
+        font-weight: 600;
         text-decoration: none;
         display: inline-block;
         margin-top: 12px;
+        box-shadow: 0 4px 10px rgba(15, 78, 122, 0.2);
       }
       .btn:hover { background: #0c3e61; }
     </style>
   </head>
   <body>
     <div class="card">
-      <div style="font-size: 44px; margin-bottom: 12px;">🏃‍♂️💨</div>
+      <div style="font-size: 48px; margin-bottom: 12px;">🏃‍♂️💨</div>
       <h1>SK-CC วิ่งให้ FUN 2026</h1>
       <p>วิทยาลัยชุมชนสงขลา (Songkhla Community College)</p>
-      <div class="status-pill">● Google Apps Script Web App ทำงานปกติ (Online)</div>
-      <p>Web App นี้ทำหน้าที่เป็นตัวกลางรับข้อมูลการสมัคร บันทึกลง Google Sheets และส่งไฟล์ภาพสลิปไปยัง Google Drive โฟลเดอร์ <strong>SKCC_FunRun_2026_Slips</strong></p>
+      <div class="status-pill">● Google Apps Script Data Bridge ทำงานปกติ (Online)</div>
+      
+      <div class="features">
+        <strong>ระบบเชื่อมต่อแบบสองทิศทาง (2-Way Sync):</strong>
+        <ul style="padding-left: 20px; margin-top: 8px;">
+          <li>ชีต <strong>Registrations_2026</strong>: จัดเก็บ เพิ่ม แก้ไข ลบ ข้อมูลผู้สมัคร (19 คอลัมน์)</li>
+          <li>ชีต <strong>Config_2026</strong>: จัดเก็บและซิงค์ตัวเลือกทุกช่องของฟอร์มรับสมัคร</li>
+          <li>โฟลเดอร์ <strong>SKCC_FunRun_2026_Slips</strong>: จัดเก็บสลิปโอนเงินอัตโนมัติใน Google Drive</li>
+        </ul>
+      </div>
+
       <a href="<?= SpreadsheetApp.getActiveSpreadsheet().getUrl() ?>" target="_blank" class="btn">
-        เปิดดู Google Sheets
+        📊 เปิดดู Google Sheets ของระบบ
       </a>
     </div>
   </body>

@@ -76,6 +76,7 @@ export interface AdminAccount {
 
 export interface AppsScriptConfig {
   webAppUrl: string;
+  spreadsheetUrl?: string;
   lastTestedAt?: string;
   isConnected?: boolean;
   message?: string;

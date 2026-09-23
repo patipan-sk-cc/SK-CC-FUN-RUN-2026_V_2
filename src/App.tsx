@@ -20,6 +20,9 @@ import {
   saveFormConfig,
   saveRegistrations,
   submitRegistration,
+  fetchFormConfigFromGoogleSheets,
+  saveFormConfigToGoogleSheets,
+  fetchRegistrationsFromGoogleSheets,
 } from './services/storageService';
 import { MapPin, Phone, Mail, Award, Calendar, Heart, Shield } from 'lucide-react';
 
@@ -36,12 +39,38 @@ export default function App() {
   // Search state passed to CheckRegistration
   const [checkSearchQuery, setCheckSearchQuery] = useState<string>('');
 
-  // Load initial data from localStorage
-  const refreshAllData = useCallback(() => {
-    setRegistrations(getRegistrations());
-    setFormConfig(getFormConfig());
-    setAdminAccounts(getAdminAccounts());
-    setAppsScriptConfig(getAppsScriptConfig());
+  // Load initial data from localStorage and attempt sync with Google Sheets
+  const refreshAllData = useCallback(async () => {
+    const localRegs = getRegistrations();
+    const localCfg = getFormConfig();
+    const localAdmins = getAdminAccounts();
+    const localScript = getAppsScriptConfig();
+
+    setRegistrations(localRegs);
+    setFormConfig(localCfg);
+    setAdminAccounts(localAdmins);
+    setAppsScriptConfig(localScript);
+
+    // If Google Apps Script Web App URL is configured, pull latest options and registrations
+    if (localScript && localScript.webAppUrl && localScript.webAppUrl.trim()) {
+      try {
+        const [remoteCfg, remoteRegs] = await Promise.allSettled([
+          fetchFormConfigFromGoogleSheets(localScript.webAppUrl),
+          fetchRegistrationsFromGoogleSheets(localScript.webAppUrl),
+        ]);
+
+        if (remoteCfg.status === 'fulfilled' && remoteCfg.value.success && remoteCfg.value.config) {
+          setFormConfig(remoteCfg.value.config);
+        }
+
+        if (remoteRegs.status === 'fulfilled' && remoteRegs.value.success && remoteRegs.value.data && remoteRegs.value.data.length > 0) {
+          setRegistrations(remoteRegs.value.data);
+          saveRegistrations(remoteRegs.value.data);
+        }
+      } catch (err) {
+        console.warn('Initial Google Sheets sync notice:', err);
+      }
+    }
   }, []);
 
   useEffect(() => {
@@ -64,10 +93,15 @@ export default function App() {
     saveRegistrations(updated);
   };
 
-  // Admin updates form configuration
+  // Admin updates form configuration (and syncs to Google Sheets if connected)
   const handleUpdateFormConfig = (newCfg: FormConfig) => {
     setFormConfig(newCfg);
     saveFormConfig(newCfg);
+    if (appsScriptConfig && appsScriptConfig.webAppUrl && appsScriptConfig.webAppUrl.trim()) {
+      saveFormConfigToGoogleSheets(appsScriptConfig.webAppUrl, newCfg).catch((err) => {
+        console.warn('Save form config to Google Sheets note:', err);
+      });
+    }
   };
 
   // Admin updates admin accounts

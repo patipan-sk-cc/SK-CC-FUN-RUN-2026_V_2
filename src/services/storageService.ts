@@ -176,7 +176,7 @@ export const generateRegistrationId = (existingList: Registration[]): string => 
  */
 export const testGoogleAppsScriptConnection = async (
   url: string
-): Promise<{ success: boolean; message: string }> => {
+): Promise<{ success: boolean; message: string; spreadsheetUrl?: string }> => {
   if (!url || !url.trim()) {
     return {
       success: false,
@@ -193,16 +193,12 @@ export const testGoogleAppsScriptConnection = async (
   }
 
   try {
-    // We send a POST or GET with ping action. Due to CORS in browser on Google Apps Script,
-    // we use a fetch test. Often Google Apps Script returns 302 redirect.
     const testEndpoint = cleanUrl.includes('?') ? `${cleanUrl}&action=ping` : `${cleanUrl}?action=ping`;
     
-    // Test with mode 'no-cors' or standard fetch
     const response = await fetch(testEndpoint, {
       method: 'GET',
       mode: 'cors',
     }).catch(async () => {
-      // If direct CORS fails, attempt no-cors mode to confirm reachable endpoint
       return await fetch(testEndpoint, {
         method: 'GET',
         mode: 'no-cors',
@@ -210,9 +206,23 @@ export const testGoogleAppsScriptConnection = async (
     });
 
     if (response) {
+      let spreadsheetUrl: string | undefined = undefined;
+      try {
+        const text = await response.clone().text();
+        if (text && text.startsWith('{')) {
+          const json = JSON.parse(text);
+          if (json.spreadsheetUrl) {
+            spreadsheetUrl = json.spreadsheetUrl;
+          }
+        }
+      } catch {
+        // Ignored for no-cors
+      }
+
       return {
         success: true,
         message: 'เชื่อมต่อ Google Apps Script สำเร็จ พร้อมรับข้อมูลเข้า Google Sheets และ Google Drive',
+        spreadsheetUrl,
       };
     }
     return {
@@ -224,6 +234,76 @@ export const testGoogleAppsScriptConnection = async (
       success: false,
       message: `เกิดข้อผิดพลาดในการเชื่อมต่อ: ${err.message || 'เน็ตเวิร์กขัดข้อง'}`,
     };
+  }
+};
+
+/**
+ * Fetch Form Configuration from Google Sheets via Google Apps Script
+ */
+export const fetchFormConfigFromGoogleSheets = async (
+  webAppUrl: string
+): Promise<{ success: boolean; config?: FormConfig; message?: string }> => {
+  if (!webAppUrl || !webAppUrl.trim()) {
+    return { success: false, message: 'ไม่ได้ระบุ Web App URL' };
+  }
+
+  try {
+    const endpoint = webAppUrl.includes('?')
+      ? `${webAppUrl.trim()}&action=getFormConfig`
+      : `${webAppUrl.trim()}?action=getFormConfig`;
+
+    const response = await fetch(endpoint, {
+      method: 'GET',
+      mode: 'cors',
+    });
+
+    const result = await response.json();
+    if (result && result.status === 'success' && result.data) {
+      const config = result.data as FormConfig;
+      // Save locally
+      saveFormConfig(config);
+      return { success: true, config, message: 'ดึงการตั้งค่าจาก Google Sheets สำเร็จ' };
+    }
+    return { success: false, message: result?.message || 'ไม่พบข้อมูลการตั้งค่าในชีต' };
+  } catch (err: any) {
+    console.warn('Fetch FormConfig error:', err);
+    return { success: false, message: err.message || 'เกิดข้อผิดพลาดในการดึงข้อมูล' };
+  }
+};
+
+/**
+ * Save Form Configuration to Google Sheets via Google Apps Script
+ */
+export const saveFormConfigToGoogleSheets = async (
+  webAppUrl: string,
+  config: FormConfig
+): Promise<{ success: boolean; message?: string }> => {
+  if (!webAppUrl || !webAppUrl.trim()) {
+    return { success: false, message: 'ไม่ได้ระบุ Web App URL' };
+  }
+
+  try {
+    const payload = {
+      action: 'saveFormConfig',
+      data: config,
+    };
+
+    const response = await fetch(webAppUrl.trim(), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain;charset=utf-8',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const result = await response.json();
+    return {
+      success: result.status === 'success',
+      message: result.message || (result.status === 'success' ? 'บันทึกลง Google Sheets สำเร็จ' : 'บันทึกล้มเหลว'),
+    };
+  } catch (err: any) {
+    console.warn('Save FormConfig error:', err);
+    return { success: false, message: err.message || 'เน็ตเวิร์กขัดข้อง' };
   }
 };
 
@@ -263,6 +343,150 @@ export const syncToGoogleAppsScript = async (
     };
   } catch (err: any) {
     console.warn('Google Apps Script background sync note:', err);
+    return { success: false, message: err.message };
+  }
+};
+
+/**
+ * Update an existing registration in Google Sheets
+ */
+export const updateRegistrationInGoogleSheets = async (
+  webAppUrl: string,
+  registration: Registration
+): Promise<{ success: boolean; driveSlipUrl?: string; message?: string }> => {
+  if (!webAppUrl || !webAppUrl.trim()) {
+    return { success: false, message: 'No Web App URL configured' };
+  }
+
+  try {
+    const payload = {
+      action: 'updateRegistration',
+      data: {
+        ...registration,
+        slipBase64: registration.slipImage,
+      },
+    };
+
+    const response = await fetch(webAppUrl.trim(), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain;charset=utf-8',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const result = await response.json();
+    return {
+      success: result.status === 'success',
+      driveSlipUrl: result.driveSlipUrl,
+      message: result.message,
+    };
+  } catch (err: any) {
+    console.warn('Update registration in Sheets error:', err);
+    return { success: false, message: err.message };
+  }
+};
+
+/**
+ * Delete a registration from Google Sheets
+ */
+export const deleteRegistrationInGoogleSheets = async (
+  webAppUrl: string,
+  id: string
+): Promise<{ success: boolean; message?: string }> => {
+  if (!webAppUrl || !webAppUrl.trim()) {
+    return { success: false, message: 'No Web App URL configured' };
+  }
+
+  try {
+    const payload = {
+      action: 'deleteRegistration',
+      id,
+    };
+
+    const response = await fetch(webAppUrl.trim(), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain;charset=utf-8',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const result = await response.json();
+    return {
+      success: result.status === 'success',
+      message: result.message,
+    };
+  } catch (err: any) {
+    console.warn('Delete registration from Sheets error:', err);
+    return { success: false, message: err.message };
+  }
+};
+
+/**
+ * Update verification status of a registration in Google Sheets
+ */
+export const updateStatusInGoogleSheets = async (
+  webAppUrl: string,
+  id: string,
+  status: string
+): Promise<{ success: boolean; message?: string }> => {
+  if (!webAppUrl || !webAppUrl.trim()) {
+    return { success: false, message: 'No Web App URL configured' };
+  }
+
+  try {
+    const payload = {
+      action: 'updateStatus',
+      id,
+      status,
+    };
+
+    const response = await fetch(webAppUrl.trim(), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain;charset=utf-8',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const result = await response.json();
+    return {
+      success: result.status === 'success',
+      message: result.message,
+    };
+  } catch (err: any) {
+    console.warn('Update status in Sheets error:', err);
+    return { success: false, message: err.message };
+  }
+};
+
+/**
+ * Fetch all registrations from Google Sheets
+ */
+export const fetchRegistrationsFromGoogleSheets = async (
+  webAppUrl: string
+): Promise<{ success: boolean; data?: Registration[]; message?: string }> => {
+  if (!webAppUrl || !webAppUrl.trim()) {
+    return { success: false, message: 'No Web App URL configured' };
+  }
+
+  try {
+    const endpoint = webAppUrl.includes('?')
+      ? `${webAppUrl.trim()}&action=getRegistrations`
+      : `${webAppUrl.trim()}?action=getRegistrations`;
+
+    const response = await fetch(endpoint, {
+      method: 'GET',
+      mode: 'cors',
+    });
+
+    const result = await response.json();
+    if (result && result.status === 'success' && Array.isArray(result.data)) {
+      return { success: true, data: result.data as Registration[] };
+    }
+    return { success: false, message: result?.message || 'ไม่สามารถดึงข้อมูลได้' };
+  } catch (err: any) {
     return { success: false, message: err.message };
   }
 };

@@ -54,7 +54,19 @@ import {
 } from '../types';
 import { ImageZoomModal } from './ImageZoomModal';
 import { AppsScriptModal } from './AppsScriptModal';
-import { exportRegistrationsToCSV, testGoogleAppsScriptConnection } from '../services/storageService';
+import {
+  exportRegistrationsToCSV,
+  testGoogleAppsScriptConnection,
+  updateRegistrationInGoogleSheets,
+  deleteRegistrationInGoogleSheets,
+  updateStatusInGoogleSheets,
+  syncToGoogleAppsScript,
+  fetchFormConfigFromGoogleSheets,
+  saveFormConfigToGoogleSheets,
+  fetchRegistrationsFromGoogleSheets,
+  generateRegistrationId,
+} from '../services/storageService';
+import { APPS_SCRIPT_CODE_GS, APPS_SCRIPT_INDEX_HTML } from '../data/appsScriptCode';
 
 interface AdminPortalProps {
   currentAdmin: AdminAccount;
@@ -239,9 +251,12 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     setTimeout(() => setLogoNotice(''), 4000);
   };
 
-  // Google Apps Script Connection Test State
+  // Google Apps Script Connection & Sheets State
   const [testUrlInput, setTestUrlInput] = useState<string>(appsScriptConfig.webAppUrl || '');
+  const [spreadsheetUrlInput, setSpreadsheetUrlInput] = useState<string>(appsScriptConfig.spreadsheetUrl || '');
   const [isTestingConnection, setIsTestingConnection] = useState<boolean>(false);
+  const [isSyncingSheets, setIsSyncingSheets] = useState<boolean>(false);
+  const [syncStatusNotice, setSyncStatusNotice] = useState<string>('');
   const [connectionTestResult, setConnectionTestResult] = useState<{
     tested: boolean;
     success: boolean;
@@ -256,6 +271,57 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       : null
   );
 
+  // Shirt & Size Chart Image URL inputs
+  const [shirtImageUrlInput, setShirtImageUrlInput] = useState<string>('');
+  const [shirtImageTitleInput, setShirtImageTitleInput] = useState<string>('');
+  const [sizeChartUrlInput, setSizeChartUrlInput] = useState<string>('');
+  const [sizeChartTitleInput, setSizeChartTitleInput] = useState<string>('');
+
+  // New Registration Form State (Admin Manual Add)
+  const [newRegistrationForm, setNewRegistrationForm] = useState<
+    Omit<Registration, 'id' | 'registeredAt' | 'status'> & { id?: string; status?: VerificationStatus }
+  >({
+    prefix: formConfig.prefixes[0]?.label || 'นาย',
+    fullName: '',
+    phone: '',
+    applicantType: formConfig.applicantTypes[0]?.name || 'บุคคลทั่วไป',
+    applicantPrice: formConfig.applicantTypes[0]?.price || 350,
+    studentYear: '',
+    studentRoom: '',
+    studentMajor: '',
+    learningLocation: '',
+    shirtSize: formConfig.shirtSizes[0]?.label || 'M',
+    deliveryType: 'pickup',
+    deliveryFee: 0,
+    address: {
+      houseNo: '',
+      soi: '',
+      road: '',
+      moo: '',
+      village: '',
+      subdistrict: '',
+      district: '',
+      province: 'สงขลา',
+      postalCode: '',
+      note: '',
+    },
+    totalAmount: formConfig.applicantTypes[0]?.price || 350,
+    slipImage: '',
+    status: 'ยังไม่ตรวจสอบ',
+    notes: '',
+  });
+
+  const handleDownloadAppsScriptFile = (filename: string, content: string) => {
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   // Handle Refresh button
   const handleRefreshClick = () => {
     setIsRefreshing(true);
@@ -263,28 +329,45 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
     setTimeout(() => setIsRefreshing(false), 500);
   };
 
-  // Status toggle for a registration row
+  // Status toggle for a registration row with Google Sheets sync
   const handleToggleStatus = (id: string) => {
-    const updated = registrations.map((item) => {
-      if (item.id === id) {
-        const newStatus: VerificationStatus =
-          item.status === 'ตรวจสอบแล้ว' ? 'ยังไม่ตรวจสอบ' : 'ตรวจสอบแล้ว';
-        return { ...item, status: newStatus };
-      }
-      return item;
-    });
-    onUpdateRegistrations(updated);
-  };
+    const reg = registrations.find((item) => item.id === id);
+    if (!reg) return;
 
-  // Delete registration record
-  const handleDeleteRegistration = (id: string, name: string) => {
-    if (window.confirm(`คุณแน่ใจหรือไม่ว่าต้องการลบข้อมูลการสมัครของ "${name}" (รหัส: ${id})?`)) {
-      const updated = registrations.filter((item) => item.id !== id);
-      onUpdateRegistrations(updated);
+    const newStatus: VerificationStatus =
+      reg.status === 'ตรวจสอบแล้ว' ? 'ยังไม่ตรวจสอบ' : 'ตรวจสอบแล้ว';
+
+    const updated = registrations.map((item) =>
+      item.id === id ? { ...item, status: newStatus } : item
+    );
+    onUpdateRegistrations(updated);
+
+    if (appsScriptConfig.webAppUrl) {
+      updateStatusInGoogleSheets(appsScriptConfig.webAppUrl, id, newStatus).catch((err) => {
+        console.warn('Update status in Google Sheets note:', err);
+      });
     }
   };
 
-  // Save edited registration
+  // Delete registration record with Google Sheets sync
+  const handleDeleteRegistration = (id: string, name: string) => {
+    if (
+      window.confirm(
+        `คุณแน่ใจหรือไม่ว่าต้องการลบข้อมูลการสมัครของ "${name}" (รหัส: ${id})?\n(ข้อมูลจะถูกลบออกจาก Google Sheets ด้วย)`
+      )
+    ) {
+      const updated = registrations.filter((item) => item.id !== id);
+      onUpdateRegistrations(updated);
+
+      if (appsScriptConfig.webAppUrl) {
+        deleteRegistrationInGoogleSheets(appsScriptConfig.webAppUrl, id).catch((err) => {
+          console.warn('Delete registration from Google Sheets note:', err);
+        });
+      }
+    }
+  };
+
+  // Save edited registration with Google Sheets sync
   const handleSaveEditedRegistration = (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingRegistration) return;
@@ -293,7 +376,178 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       item.id === editingRegistration.id ? editingRegistration : item
     );
     onUpdateRegistrations(updated);
+
+    if (appsScriptConfig.webAppUrl) {
+      updateRegistrationInGoogleSheets(appsScriptConfig.webAppUrl, editingRegistration).catch((err) => {
+        console.warn('Update registration in Google Sheets note:', err);
+      });
+    }
+
     setEditingRegistration(null);
+  };
+
+  // Create new registration with Google Sheets sync
+  const handleCreateNewRegistrationSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newRegistrationForm.fullName.trim()) {
+      alert('กรุณากรอกชื่อ-สกุลผู้สมัคร');
+      return;
+    }
+    if (!newRegistrationForm.phone.trim()) {
+      alert('กรุณากรอกเบอร์โทรติดต่อ');
+      return;
+    }
+
+    const newId = generateRegistrationId(registrations);
+    const newReg: Registration = {
+      ...newRegistrationForm,
+      id: newId,
+      registeredAt: new Date().toISOString(),
+      status: newRegistrationForm.status || 'ยังไม่ตรวจสอบ',
+    };
+
+    const updated = [newReg, ...registrations];
+    onUpdateRegistrations(updated);
+
+    if (appsScriptConfig.webAppUrl) {
+      syncToGoogleAppsScript(appsScriptConfig.webAppUrl, newReg)
+        .then((res) => {
+          if (res.success && res.driveSlipUrl) {
+            const listWithDrive = updated.map((r) =>
+              r.id === newId ? { ...r, driveFileUrl: res.driveSlipUrl } : r
+            );
+            onUpdateRegistrations(listWithDrive);
+          }
+        })
+        .catch(console.warn);
+    }
+
+    setIsNewRegistrationModalOpen(false);
+    // Reset form
+    setNewRegistrationForm({
+      prefix: formConfig.prefixes[0]?.label || 'นาย',
+      fullName: '',
+      phone: '',
+      applicantType: formConfig.applicantTypes[0]?.name || 'บุคคลทั่วไป',
+      applicantPrice: formConfig.applicantTypes[0]?.price || 350,
+      studentYear: '',
+      studentRoom: '',
+      studentMajor: '',
+      learningLocation: '',
+      shirtSize: formConfig.shirtSizes[0]?.label || 'M',
+      deliveryType: 'pickup',
+      deliveryFee: 0,
+      address: {
+        houseNo: '',
+        soi: '',
+        road: '',
+        moo: '',
+        village: '',
+        subdistrict: '',
+        district: '',
+        province: 'สงขลา',
+        postalCode: '',
+        note: '',
+      },
+      totalAmount: formConfig.applicantTypes[0]?.price || 350,
+      slipImage: '',
+      status: 'ยังไม่ตรวจสอบ',
+      notes: '',
+    });
+  };
+
+  // Add Shirt Image from URL (Method 2)
+  const handleAddShirtImageFromUrl = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!shirtImageUrlInput.trim()) {
+      alert('กรุณากรอก URL ลิงก์รูปภาพแบบเสื้อ');
+      return;
+    }
+    const newImg: ShirtImage = {
+      id: 'shirt-' + Date.now(),
+      title: shirtImageTitleInput.trim() || 'แบบเสื้อวิ่ง 2026',
+      url: shirtImageUrlInput.trim(),
+    };
+    onUpdateFormConfig({
+      ...formConfig,
+      shirtImages: [...formConfig.shirtImages, newImg],
+    });
+    setShirtImageUrlInput('');
+    setShirtImageTitleInput('');
+    alert('เพิ่มแบบเสื้อจาก URL สำเร็จแล้ว');
+  };
+
+  // Add Size Chart from URL (Method 2)
+  const handleAddSizeChartFromUrl = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!sizeChartUrlInput.trim()) {
+      alert('กรุณากรอก URL ลิงก์รูปภาพตารางขนาดเสื้อ');
+      return;
+    }
+    const newChart: ShirtImage = {
+      id: 'chart-' + Date.now(),
+      title: sizeChartTitleInput.trim() || 'ตารางขนาดเสื้อ 2026',
+      url: sizeChartUrlInput.trim(),
+    };
+    onUpdateFormConfig({
+      ...formConfig,
+      sizeChartImages: [...formConfig.sizeChartImages, newChart],
+    });
+    setSizeChartUrlInput('');
+    setSizeChartTitleInput('');
+    alert('เพิ่มตารางขนาดเสื้อจาก URL สำเร็จแล้ว');
+  };
+
+  // Pull latest Config & Registrations from Google Sheets
+  const handlePullFromSheets = async () => {
+    if (!appsScriptConfig.webAppUrl) {
+      alert('กรุณาระบุ URL Google Apps Script ก่อน');
+      return;
+    }
+    setIsSyncingSheets(true);
+    setSyncStatusNotice('กำลังดึงข้อมูลจาก Google Sheets...');
+    try {
+      const [cfgRes, regRes] = await Promise.all([
+        fetchFormConfigFromGoogleSheets(appsScriptConfig.webAppUrl),
+        fetchRegistrationsFromGoogleSheets(appsScriptConfig.webAppUrl),
+      ]);
+      if (cfgRes.success && cfgRes.config) {
+        onUpdateFormConfig(cfgRes.config);
+      }
+      if (regRes.success && regRes.data && regRes.data.length > 0) {
+        onUpdateRegistrations(regRes.data);
+      }
+      setSyncStatusNotice('ดึงตัวเลือกและรายชื่อผู้สมัครจาก Google Sheets สำเร็จแล้ว!');
+      setTimeout(() => setSyncStatusNotice(''), 4000);
+    } catch (err: any) {
+      alert(`ดึงข้อมูลไม่สำเร็จ: ${err.message}`);
+      setSyncStatusNotice('');
+    } finally {
+      setIsSyncingSheets(false);
+    }
+  };
+
+  // Push all Form Config to Google Sheets Config_2026
+  const handlePushConfigToSheets = async () => {
+    if (!appsScriptConfig.webAppUrl) {
+      alert('กรุณาระบุ URL Google Apps Script ก่อน');
+      return;
+    }
+    setIsSyncingSheets(true);
+    setSyncStatusNotice('กำลังบันทึกตัวเลือกลง Google Sheets...');
+    try {
+      const res = await saveFormConfigToGoogleSheets(appsScriptConfig.webAppUrl, formConfig);
+      if (res.success) {
+        setSyncStatusNotice('บันทึกตัวเลือกทั้งหมดลงชีต Config_2026 สำเร็จเรียบร้อย!');
+        setTimeout(() => setSyncStatusNotice(''), 4000);
+      } else {
+        alert(`บันทึกล้มเหลว: ${res.message}`);
+      }
+    } catch (err: any) {
+      alert(`เกิดข้อผิดพลาด: ${err.message}`);
+    } finally {
+      setIsSyncingSheets(false);
+    }
   };
 
   // Test Google Apps Script Connection
@@ -305,8 +559,13 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       success: result.success,
       message: result.message,
     });
+    const finalSpreadsheetUrl = result.spreadsheetUrl || spreadsheetUrlInput || appsScriptConfig.spreadsheetUrl;
+    if (result.spreadsheetUrl) {
+      setSpreadsheetUrlInput(result.spreadsheetUrl);
+    }
     onUpdateAppsScriptConfig({
       webAppUrl: testUrlInput.trim(),
+      spreadsheetUrl: finalSpreadsheetUrl,
       isConnected: result.success,
       lastTestedAt: new Date().toISOString(),
       message: result.message,
@@ -918,12 +1177,36 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
       {/* ========================================================================= */}
       {activeAdminTab === 'formSettings' && (
         <div className="space-y-6 animate-in fade-in duration-150">
-          <div className="p-4 rounded-xl bg-amber-50 border border-[#EDBA48]/40 text-xs text-amber-900 flex items-center gap-2">
-            <Settings className="w-4 h-4 text-[#0F4E7A] shrink-0" />
-            <span>
-              แอดมินสามารถ เพิ่ม ลบ แก้ไข โลโก้เว็บไซต์ ข้อความประชาสัมพันธ์ และช่องฟอร์มกรอกข้อมูลทุกช่องได้ที่นี่
-              ข้อมูลจะอัปเดตลงหน้าเว็บทันที
-            </span>
+          <div className="p-4 rounded-xl bg-amber-50 border border-[#EDBA48]/40 text-xs text-amber-900 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <Settings className="w-4 h-4 text-[#0F4E7A] shrink-0" />
+              <span>
+                แอดมินสามารถ เพิ่ม ลบ แก้ไข โลโก้เว็บไซต์ ข้อความประชาสัมพันธ์ และช่องฟอร์มกรอกข้อมูลทุกช่องได้ที่นี่
+                ข้อมูลจะอัปเดตลงหน้าเว็บและชีต <strong>Config_2026</strong> ทันที
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={handlePullFromSheets}
+                disabled={isSyncingSheets || !appsScriptConfig.webAppUrl}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 text-xs font-semibold transition disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 text-[#0F4E7A] ${isSyncingSheets ? 'animate-spin' : ''}`} />
+                <span>ดึงตัวเลือกจาก Sheets</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handlePushConfigToSheets}
+                disabled={isSyncingSheets || !appsScriptConfig.webAppUrl}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#0F4E7A] text-white hover:bg-[#0c3e61] text-xs font-semibold transition disabled:opacity-50"
+              >
+                <Check className="w-3.5 h-3.5 text-[#EDBA48]" />
+                <span>บันทึกตัวเลือกลง Google Sheets</span>
+              </button>
+            </div>
           </div>
 
           {/* Form Settings: Website Logo Management */}
@@ -1869,32 +2152,77 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                 ))}
               </div>
 
-              {/* Upload or Add Shirt Image */}
-              <div className="space-y-2">
-                <label className="block text-xs font-semibold text-slate-600">เพิ่มรูปภาพแบบเสื้อใหม่</label>
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (!file) return;
-                    const reader = new FileReader();
-                    reader.onload = (ev) => {
-                      const dataUrl = ev.target?.result as string;
-                      const newImg: ShirtImage = {
-                        id: 'shirt-' + Date.now(),
-                        title: file.name.replace(/\.[^/.]+$/, ''),
-                        url: dataUrl,
+              {/* Upload or Add Shirt Image: Method 1 and Method 2 */}
+              <div className="space-y-3 pt-3 border-t border-slate-100">
+                <span className="block text-xs font-bold text-[#0F4E7A]">เพิ่มรูปภาพแบบเสื้อวิ่ง (เลือกได้ 2 วิธี)</span>
+
+                {/* Method 1: Upload File */}
+                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                  <label className="block text-xs font-semibold text-slate-700 mb-1 flex items-center gap-1.5">
+                    <Upload className="w-3.5 h-3.5 text-[#0F4E7A]" />
+                    <span>วิธีที่ 1: เลือกไฟล์รูปภาพจากเครื่อง</span>
+                  </label>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      const reader = new FileReader();
+                      reader.onload = (ev) => {
+                        const dataUrl = ev.target?.result as string;
+                        const newImg: ShirtImage = {
+                          id: 'shirt-' + Date.now(),
+                          title: file.name.replace(/\.[^/.]+$/, ''),
+                          url: dataUrl,
+                        };
+                        onUpdateFormConfig({
+                          ...formConfig,
+                          shirtImages: [...formConfig.shirtImages, newImg],
+                        });
                       };
-                      onUpdateFormConfig({
-                        ...formConfig,
-                        shirtImages: [...formConfig.shirtImages, newImg],
-                      });
-                    };
-                    reader.readAsDataURL(file);
-                  }}
-                  className="text-xs file:mr-2 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-slate-100 file:text-slate-700 hover:file:bg-slate-200"
-                />
+                      reader.readAsDataURL(file);
+                      e.target.value = '';
+                    }}
+                    className="text-xs file:mr-2 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-slate-100 file:text-slate-700 hover:file:bg-slate-200"
+                  />
+                </div>
+
+                {/* Method 2: Image URL */}
+                <form onSubmit={handleAddShirtImageFromUrl} className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
+                  <label className="block text-xs font-semibold text-slate-700 flex items-center gap-1.5">
+                    <Link className="w-3.5 h-3.5 text-[#EDBA48]" />
+                    <span>วิธีที่ 2: ระบุที่อยู่ลิงก์รูปภาพโลโก้ / แบบเสื้อ (Image URL)</span>
+                  </label>
+                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-2">
+                    <div className="sm:col-span-7">
+                      <input
+                        type="url"
+                        value={shirtImageUrlInput}
+                        onChange={(e) => setShirtImageUrlInput(e.target.value)}
+                        placeholder="https://example.com/shirt-design.jpg"
+                        className="w-full px-3 py-1.5 text-xs rounded-lg border border-slate-300 font-mono"
+                      />
+                    </div>
+                    <div className="sm:col-span-3">
+                      <input
+                        type="text"
+                        value={shirtImageTitleInput}
+                        onChange={(e) => setShirtImageTitleInput(e.target.value)}
+                        placeholder="ชื่อภาพ (เช่น ด้านหน้า)"
+                        className="w-full px-3 py-1.5 text-xs rounded-lg border border-slate-300"
+                      />
+                    </div>
+                    <div className="sm:col-span-2">
+                      <button
+                        type="submit"
+                        className="w-full py-1.5 px-2.5 text-xs rounded-lg bg-[#0F4E7A] text-white font-semibold hover:bg-[#0c3e61] transition cursor-pointer"
+                      >
+                        + เพิ่มจาก URL
+                      </button>
+                    </div>
+                  </div>
+                </form>
               </div>
             </div>
 
@@ -1945,32 +2273,77 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                 ))}
               </div>
 
-              {/* Upload Size Chart Image */}
-              <div className="space-y-2">
-                <label className="block text-xs font-semibold text-slate-600">อัปโหลดภาพตารางไซส์ใหม่</label>
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (!file) return;
-                    const reader = new FileReader();
-                    reader.onload = (ev) => {
-                      const dataUrl = ev.target?.result as string;
-                      const newChart: ShirtImage = {
-                        id: 'chart-' + Date.now(),
-                        title: 'ตารางขนาดเสื้อ (' + file.name + ')',
-                        url: dataUrl,
+              {/* Upload Size Chart Image: Method 1 and Method 2 */}
+              <div className="space-y-3 pt-3 border-t border-slate-100">
+                <span className="block text-xs font-bold text-[#0F4E7A]">เพิ่มภาพตารางขนาดเสื้อ (เลือกได้ 2 วิธี)</span>
+
+                {/* Method 1: Upload File */}
+                <div className="p-3 bg-slate-50 rounded-xl border border-slate-200">
+                  <label className="block text-xs font-semibold text-slate-700 mb-1 flex items-center gap-1.5">
+                    <Upload className="w-3.5 h-3.5 text-[#0F4E7A]" />
+                    <span>วิธีที่ 1: เลือกไฟล์รูปภาพจากเครื่อง</span>
+                  </label>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      const reader = new FileReader();
+                      reader.onload = (ev) => {
+                        const dataUrl = ev.target?.result as string;
+                        const newChart: ShirtImage = {
+                          id: 'chart-' + Date.now(),
+                          title: 'ตารางขนาดเสื้อ (' + file.name + ')',
+                          url: dataUrl,
+                        };
+                        onUpdateFormConfig({
+                          ...formConfig,
+                          sizeChartImages: [...formConfig.sizeChartImages, newChart],
+                        });
                       };
-                      onUpdateFormConfig({
-                        ...formConfig,
-                        sizeChartImages: [...formConfig.sizeChartImages, newChart],
-                      });
-                    };
-                    reader.readAsDataURL(file);
-                  }}
-                  className="text-xs file:mr-2 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-slate-100 file:text-slate-700 hover:file:bg-slate-200"
-                />
+                      reader.readAsDataURL(file);
+                      e.target.value = '';
+                    }}
+                    className="text-xs file:mr-2 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-slate-100 file:text-slate-700 hover:file:bg-slate-200"
+                  />
+                </div>
+
+                {/* Method 2: Image URL */}
+                <form onSubmit={handleAddSizeChartFromUrl} className="p-3 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
+                  <label className="block text-xs font-semibold text-slate-700 flex items-center gap-1.5">
+                    <Link className="w-3.5 h-3.5 text-[#EDBA48]" />
+                    <span>วิธีที่ 2: ระบุที่อยู่ลิงก์รูปภาพตารางไซส์ (Image URL)</span>
+                  </label>
+                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-2">
+                    <div className="sm:col-span-7">
+                      <input
+                        type="url"
+                        value={sizeChartUrlInput}
+                        onChange={(e) => setSizeChartUrlInput(e.target.value)}
+                        placeholder="https://example.com/size-chart.jpg"
+                        className="w-full px-3 py-1.5 text-xs rounded-lg border border-slate-300 font-mono"
+                      />
+                    </div>
+                    <div className="sm:col-span-3">
+                      <input
+                        type="text"
+                        value={sizeChartTitleInput}
+                        onChange={(e) => setSizeChartTitleInput(e.target.value)}
+                        placeholder="ชื่อภาพ (เช่น ตารางไซส์ 2026)"
+                        className="w-full px-3 py-1.5 text-xs rounded-lg border border-slate-300"
+                      />
+                    </div>
+                    <div className="sm:col-span-2">
+                      <button
+                        type="submit"
+                        className="w-full py-1.5 px-2.5 text-xs rounded-lg bg-[#0F4E7A] text-white font-semibold hover:bg-[#0c3e61] transition cursor-pointer"
+                      >
+                        + เพิ่มจาก URL
+                      </button>
+                    </div>
+                  </div>
+                </form>
               </div>
             </div>
           </div>
@@ -2077,14 +2450,34 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                 </div>
               </div>
 
-              <button
-                type="button"
-                onClick={() => setIsAppsScriptModalOpen(true)}
-                className="flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg bg-[#0F4E7A] text-white font-semibold hover:bg-[#0c3e61] transition"
-              >
-                <FileCode className="w-3.5 h-3.5 text-[#EDBA48]" />
-                <span>เปิดดูโค้ด .gs &amp; index.html</span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleDownloadAppsScriptFile('Code.gs', APPS_SCRIPT_CODE_GS)}
+                  className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-700 font-semibold hover:bg-slate-50 transition shadow-xs"
+                  title="ดาวน์โหลดไฟล์สคริปต์ Code.gs"
+                >
+                  <Download className="w-3.5 h-3.5 text-[#0F4E7A]" />
+                  <span>ดาวน์โหลด Code.gs</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleDownloadAppsScriptFile('index.html', APPS_SCRIPT_INDEX_HTML)}
+                  className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border border-slate-300 bg-white text-slate-700 font-semibold hover:bg-slate-50 transition shadow-xs"
+                  title="ดาวน์โหลดไฟล์เว็บ index.html"
+                >
+                  <Download className="w-3.5 h-3.5 text-[#0F4E7A]" />
+                  <span>ดาวน์โหลด index.html</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsAppsScriptModalOpen(true)}
+                  className="flex items-center gap-1.5 text-xs px-3.5 py-1.5 rounded-lg bg-[#0F4E7A] text-white font-semibold hover:bg-[#0c3e61] transition shadow-xs"
+                >
+                  <FileCode className="w-3.5 h-3.5 text-[#EDBA48]" />
+                  <span>เปิดดูโค้ด &amp; วิธีติดตั้ง</span>
+                </button>
+              </div>
             </div>
 
             {/* Input URL & Test Button */}
@@ -2135,6 +2528,89 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                     <span>{connectionTestResult.message}</span>
                   </div>
                 )}
+              </div>
+
+              {/* Direct Link to Google Sheets & 2-Way Sync Actions */}
+              <div className="pt-4 border-t border-slate-200 space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                      <Database className="w-3.5 h-3.5 text-[#EDBA48]" />
+                      <span>ลิงก์ไปยัง Google Sheets ของระบบ</span>
+                    </label>
+                    <p className="text-[11px] text-slate-500">
+                      เข้าถึงชีต Registrations_2026 (ตารางผู้สมัคร) และ Config_2026 (ตารางตัวเลือก) ได้โดยตรง
+                    </p>
+                  </div>
+
+                  {(spreadsheetUrlInput || appsScriptConfig.spreadsheetUrl) && (
+                    <a
+                      href={spreadsheetUrlInput || appsScriptConfig.spreadsheetUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs sm:text-sm font-bold shadow-xs transition cursor-pointer self-start sm:self-auto shrink-0"
+                    >
+                      <ExternalLink className="w-4 h-4" />
+                      <span>เปิดดู Google Sheets ในแท็บใหม่</span>
+                    </a>
+                  )}
+                </div>
+
+                <div className="flex gap-2">
+                  <input
+                    type="url"
+                    value={spreadsheetUrlInput}
+                    onChange={(e) => {
+                      setSpreadsheetUrlInput(e.target.value);
+                      onUpdateAppsScriptConfig({
+                        ...appsScriptConfig,
+                        spreadsheetUrl: e.target.value.trim(),
+                      });
+                    }}
+                    placeholder="https://docs.google.com/spreadsheets/d/.../edit"
+                    className="flex-1 px-3.5 py-2 text-xs rounded-xl border border-slate-300 font-mono bg-white focus:outline-none focus:ring-2 focus:ring-[#0F4E7A]/20"
+                  />
+                  {spreadsheetUrlInput && (
+                    <a
+                      href={spreadsheetUrlInput}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-3.5 py-2 rounded-xl bg-[#0F4E7A] text-white text-xs font-semibold hover:bg-[#0c3e61] flex items-center gap-1.5 transition shrink-0"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5 text-[#EDBA48]" />
+                      <span>เปิดลิงก์</span>
+                    </a>
+                  )}
+                </div>
+
+                {/* 2-Way Sync Buttons */}
+                <div className="flex flex-wrap items-center gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={handlePullFromSheets}
+                    disabled={isSyncingSheets || !testUrlInput.trim()}
+                    className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 text-xs font-semibold transition disabled:opacity-50 shadow-2xs"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 text-[#0F4E7A] ${isSyncingSheets ? 'animate-spin' : ''}`} />
+                    <span>ดึงตัวเลือกและข้อมูลผู้สมัครจาก Google Sheets</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handlePushConfigToSheets}
+                    disabled={isSyncingSheets || !testUrlInput.trim()}
+                    className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#0F4E7A] text-white hover:bg-[#0c3e61] text-xs font-semibold transition disabled:opacity-50 shadow-2xs"
+                  >
+                    <Check className="w-3.5 h-3.5 text-[#EDBA48]" />
+                    <span>บันทึกตัวเลือกฟอร์มทั้งหมดขึ้น Google Sheets ตอนนี้</span>
+                  </button>
+
+                  {syncStatusNotice && (
+                    <span className="text-xs font-bold text-emerald-700 bg-emerald-100 px-3 py-1.5 rounded-lg border border-emerald-300 animate-in fade-in">
+                      {syncStatusNotice}
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -2868,6 +3344,563 @@ export const AdminPortal: React.FC<AdminPortalProps> = ({
                 >
                   <Check className="w-4 h-4 text-[#EDBA48]" />
                   <span>บันทึกการแก้ไขข้อมูลทั้งหมด</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL: ADD NEW REGISTRATION (MANUAL) */}
+      {/* ========================================================================= */}
+      {isNewRegistrationModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/75 backdrop-blur-xs p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-3xl w-full p-6 border border-slate-200 my-8 max-h-[90vh] overflow-y-auto animate-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between pb-3 mb-4 border-b border-slate-100">
+              <div>
+                <h3 className="font-bold text-base text-[#0F4E7A] flex items-center gap-2">
+                  <UserPlus className="w-5 h-5 text-[#EDBA48]" />
+                  <span>เพิ่มข้อมูลผู้สมัครใหม่ (Add New Runner)</span>
+                </h3>
+                <p className="text-[11px] text-slate-400">
+                  กรอกข้อมูลผู้สมัครได้ทุกช่อง ข้อมูลจะถูกบันทึกลงระบบและส่งขึ้น Google Sheets ทันที
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsNewRegistrationModalOpen(false)}
+                className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreateNewRegistrationSubmit} className="space-y-5 text-xs sm:text-sm">
+              {/* SECTION 1: Personal Info */}
+              <div className="space-y-3">
+                <h4 className="font-bold text-xs uppercase tracking-wider text-[#0F4E7A] flex items-center gap-1.5 border-b pb-1">
+                  <User className="w-3.5 h-3.5" />
+                  <span>1. ข้อมูลส่วนตัวผู้สมัคร</span>
+                </h4>
+                <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
+                  <div className="sm:col-span-3">
+                    <label className="block font-semibold text-slate-700 mb-1">คำนำหน้า</label>
+                    <select
+                      value={newRegistrationForm.prefix}
+                      onChange={(e) =>
+                        setNewRegistrationForm({ ...newRegistrationForm, prefix: e.target.value })
+                      }
+                      className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-white"
+                    >
+                      {formConfig.prefixes.map((p) => (
+                        <option key={p.id} value={p.label}>
+                          {p.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="sm:col-span-5">
+                    <label className="block font-semibold text-slate-700 mb-1">ชื่อ-สกุล *</label>
+                    <input
+                      type="text"
+                      required
+                      value={newRegistrationForm.fullName}
+                      onChange={(e) =>
+                        setNewRegistrationForm({ ...newRegistrationForm, fullName: e.target.value })
+                      }
+                      placeholder="เช่น สมชาย ใจดี"
+                      className="w-full px-3 py-2 rounded-lg border border-slate-300"
+                    />
+                  </div>
+
+                  <div className="sm:col-span-4">
+                    <label className="block font-semibold text-slate-700 mb-1">เบอร์ติดต่อ *</label>
+                    <input
+                      type="tel"
+                      required
+                      value={newRegistrationForm.phone}
+                      onChange={(e) =>
+                        setNewRegistrationForm({ ...newRegistrationForm, phone: e.target.value })
+                      }
+                      placeholder="0812345678"
+                      className="w-full px-3 py-2 rounded-lg border border-slate-300 font-mono"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* SECTION 2: Applicant Type & Student Info */}
+              <div className="space-y-3">
+                <h4 className="font-bold text-xs uppercase tracking-wider text-[#0F4E7A] flex items-center gap-1.5 border-b pb-1">
+                  <Tag className="w-3.5 h-3.5" />
+                  <span>2. ประเภทผู้สมัคร &amp; ข้อมูลนักศึกษา</span>
+                </h4>
+                <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
+                  <div className="sm:col-span-8">
+                    <label className="block font-semibold text-slate-700 mb-1">ประเภทผู้สมัคร</label>
+                    <select
+                      value={newRegistrationForm.applicantType}
+                      onChange={(e) => {
+                        const chosen = formConfig.applicantTypes.find((t) => t.name === e.target.value);
+                        const price = chosen ? chosen.price : 350;
+                        const fee = newRegistrationForm.deliveryType === 'postal' ? formConfig.deliveryFee : 0;
+                        setNewRegistrationForm({
+                          ...newRegistrationForm,
+                          applicantType: e.target.value,
+                          applicantPrice: price,
+                          totalAmount: price + fee,
+                        });
+                      }}
+                      className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-white"
+                    >
+                      {formConfig.applicantTypes.map((t) => (
+                        <option key={t.id} value={t.name}>
+                          {t.name} ({t.price} บาท)
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="sm:col-span-4">
+                    <label className="block font-semibold text-slate-700 mb-1">ราคาค่าสมัคร (บาท)</label>
+                    <input
+                      type="number"
+                      value={newRegistrationForm.applicantPrice}
+                      onChange={(e) => {
+                        const pr = Number(e.target.value) || 0;
+                        const fee = newRegistrationForm.deliveryType === 'postal' ? formConfig.deliveryFee : 0;
+                        setNewRegistrationForm({
+                          ...newRegistrationForm,
+                          applicantPrice: pr,
+                          totalAmount: pr + fee,
+                        });
+                      }}
+                      className="w-full px-3 py-2 rounded-lg border border-slate-300 font-mono"
+                    />
+                  </div>
+                </div>
+
+                {/* Student specific fields */}
+                <div className="p-3 bg-blue-50/50 rounded-xl border border-blue-100 space-y-2">
+                  <span className="block text-xs font-semibold text-blue-900">
+                    ข้อมูลนักศึกษา (กรณีเป็นนักศึกษา วชช.สงขลา)
+                  </span>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    <div>
+                      <label className="block text-[11px] text-slate-600 mb-0.5">รหัสปี (ชั้นปี)</label>
+                      <input
+                        type="text"
+                        value={newRegistrationForm.studentYear || ''}
+                        onChange={(e) =>
+                          setNewRegistrationForm({
+                            ...newRegistrationForm,
+                            studentYear: e.target.value,
+                          })
+                        }
+                        placeholder="เช่น 67"
+                        className="w-full px-2.5 py-1.5 rounded border border-slate-300 text-xs bg-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-slate-600 mb-0.5">ห้อง</label>
+                      <input
+                        type="text"
+                        value={newRegistrationForm.studentRoom || ''}
+                        onChange={(e) =>
+                          setNewRegistrationForm({
+                            ...newRegistrationForm,
+                            studentRoom: e.target.value,
+                          })
+                        }
+                        placeholder="เช่น 1, 2"
+                        className="w-full px-2.5 py-1.5 rounded border border-slate-300 text-xs bg-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-slate-600 mb-0.5">สาขาวิชา</label>
+                      <input
+                        type="text"
+                        value={newRegistrationForm.studentMajor || ''}
+                        onChange={(e) =>
+                          setNewRegistrationForm({
+                            ...newRegistrationForm,
+                            studentMajor: e.target.value,
+                          })
+                        }
+                        placeholder="เช่น การจัดการ"
+                        className="w-full px-2.5 py-1.5 rounded border border-slate-300 text-xs bg-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] text-slate-600 mb-0.5">สถานที่จัดการศึกษา</label>
+                      <input
+                        type="text"
+                        value={newRegistrationForm.learningLocation || ''}
+                        onChange={(e) =>
+                          setNewRegistrationForm({
+                            ...newRegistrationForm,
+                            learningLocation: e.target.value,
+                          })
+                        }
+                        placeholder="เช่น วชช.สงขลา"
+                        className="w-full px-2.5 py-1.5 rounded border border-slate-300 text-xs bg-white"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* SECTION 3: Shirt Size & Delivery */}
+              <div className="space-y-3">
+                <h4 className="font-bold text-xs uppercase tracking-wider text-[#0F4E7A] flex items-center gap-1.5 border-b pb-1">
+                  <Shirt className="w-3.5 h-3.5" />
+                  <span>3. ไซส์เสื้อ &amp; รูปแบบการจัดส่ง</span>
+                </h4>
+                <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
+                  <div className="sm:col-span-6">
+                    <label className="block font-semibold text-slate-700 mb-1">ขนาดเสื้อวิ่ง</label>
+                    <select
+                      value={newRegistrationForm.shirtSize}
+                      onChange={(e) =>
+                        setNewRegistrationForm({ ...newRegistrationForm, shirtSize: e.target.value })
+                      }
+                      className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-white"
+                    >
+                      {formConfig.shirtSizes.map((s) => (
+                        <option key={s.id} value={s.label}>
+                          {s.label} ({s.chest} นิ้ว / {s.length} นิ้ว)
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="sm:col-span-6">
+                    <label className="block font-semibold text-slate-700 mb-1">รูปแบบการจัดส่ง</label>
+                    <select
+                      value={newRegistrationForm.deliveryType}
+                      onChange={(e) => {
+                        const dType = e.target.value as DeliveryType;
+                        const fee = dType === 'postal' ? formConfig.deliveryFee : 0;
+                        setNewRegistrationForm({
+                          ...newRegistrationForm,
+                          deliveryType: dType,
+                          deliveryFee: fee,
+                          totalAmount: newRegistrationForm.applicantPrice + fee,
+                        });
+                      }}
+                      className="w-full px-3 py-2 rounded-lg border border-slate-300 bg-white"
+                    >
+                      <option value="pickup">รับด้วยตัวเอง ณ วิทยาลัยชุมชนสงขลา (ฟรี)</option>
+                      <option value="postal">จัดส่งทางไปรษณีย์ (+{formConfig.deliveryFee} บาท)</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Postal Address Fields */}
+                {newRegistrationForm.deliveryType === 'postal' && (
+                  <div className="p-3 bg-amber-50/50 rounded-xl border border-amber-200 space-y-2">
+                    <span className="block text-xs font-semibold text-amber-900">
+                      ที่อยู่จัดส่งพัสดุไปรษณีย์
+                    </span>
+                    <div className="grid grid-cols-2 sm:grid-cols-12 gap-2 text-xs">
+                      <div className="sm:col-span-3">
+                        <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">บ้านเลขที่</label>
+                        <input
+                          type="text"
+                          value={newRegistrationForm.address?.houseNo || ''}
+                          onChange={(e) =>
+                            setNewRegistrationForm({
+                              ...newRegistrationForm,
+                              address: {
+                                ...(newRegistrationForm.address || {
+                                  houseNo: '',
+                                  soi: '',
+                                  road: '',
+                                  moo: '',
+                                  village: '',
+                                  subdistrict: '',
+                                  district: '',
+                                  province: 'สงขลา',
+                                  postalCode: '',
+                                  note: '',
+                                }),
+                                houseNo: e.target.value,
+                              },
+                            })
+                          }
+                          className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white"
+                        />
+                      </div>
+                      <div className="sm:col-span-3">
+                        <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">หมู่ที่</label>
+                        <input
+                          type="text"
+                          value={newRegistrationForm.address?.moo || ''}
+                          onChange={(e) =>
+                            setNewRegistrationForm({
+                              ...newRegistrationForm,
+                              address: {
+                                ...(newRegistrationForm.address || {
+                                  houseNo: '',
+                                  soi: '',
+                                  road: '',
+                                  moo: '',
+                                  village: '',
+                                  subdistrict: '',
+                                  district: '',
+                                  province: 'สงขลา',
+                                  postalCode: '',
+                                  note: '',
+                                }),
+                                moo: e.target.value,
+                              },
+                            })
+                          }
+                          className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white"
+                        />
+                      </div>
+                      <div className="sm:col-span-6">
+                        <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">ตำบล / แขวง</label>
+                        <input
+                          type="text"
+                          value={newRegistrationForm.address?.subdistrict || ''}
+                          onChange={(e) =>
+                            setNewRegistrationForm({
+                              ...newRegistrationForm,
+                              address: {
+                                ...(newRegistrationForm.address || {
+                                  houseNo: '',
+                                  soi: '',
+                                  road: '',
+                                  moo: '',
+                                  village: '',
+                                  subdistrict: '',
+                                  district: '',
+                                  province: 'สงขลา',
+                                  postalCode: '',
+                                  note: '',
+                                }),
+                                subdistrict: e.target.value,
+                              },
+                            })
+                          }
+                          className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white"
+                        />
+                      </div>
+                      <div className="sm:col-span-6">
+                        <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">อำเภอ / เขต</label>
+                        <input
+                          type="text"
+                          value={newRegistrationForm.address?.district || ''}
+                          onChange={(e) =>
+                            setNewRegistrationForm({
+                              ...newRegistrationForm,
+                              address: {
+                                ...(newRegistrationForm.address || {
+                                  houseNo: '',
+                                  soi: '',
+                                  road: '',
+                                  moo: '',
+                                  village: '',
+                                  subdistrict: '',
+                                  district: '',
+                                  province: 'สงขลา',
+                                  postalCode: '',
+                                  note: '',
+                                }),
+                                district: e.target.value,
+                              },
+                            })
+                          }
+                          className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white"
+                        />
+                      </div>
+                      <div className="sm:col-span-3">
+                        <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">จังหวัด</label>
+                        <input
+                          type="text"
+                          value={newRegistrationForm.address?.province || 'สงขลา'}
+                          onChange={(e) =>
+                            setNewRegistrationForm({
+                              ...newRegistrationForm,
+                              address: {
+                                ...(newRegistrationForm.address || {
+                                  houseNo: '',
+                                  soi: '',
+                                  road: '',
+                                  moo: '',
+                                  village: '',
+                                  subdistrict: '',
+                                  district: '',
+                                  province: 'สงขลา',
+                                  postalCode: '',
+                                  note: '',
+                                }),
+                                province: e.target.value,
+                              },
+                            })
+                          }
+                          className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white"
+                        />
+                      </div>
+                      <div className="sm:col-span-3">
+                        <label className="block text-[11px] font-semibold text-slate-600 mb-0.5">รหัสไปรษณีย์</label>
+                        <input
+                          type="text"
+                          value={newRegistrationForm.address?.postalCode || ''}
+                          onChange={(e) =>
+                            setNewRegistrationForm({
+                              ...newRegistrationForm,
+                              address: {
+                                ...(newRegistrationForm.address || {
+                                  houseNo: '',
+                                  soi: '',
+                                  road: '',
+                                  moo: '',
+                                  village: '',
+                                  subdistrict: '',
+                                  district: '',
+                                  province: 'สงขลา',
+                                  postalCode: '',
+                                  note: '',
+                                }),
+                                postalCode: e.target.value,
+                              },
+                            })
+                          }
+                          className="w-full px-2.5 py-1.5 rounded border border-slate-300 bg-white"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* SECTION 4: Payment & Status */}
+              <div className="space-y-3">
+                <h4 className="font-bold text-xs uppercase tracking-wider text-[#0F4E7A] flex items-center gap-1.5 border-b pb-1">
+                  <CreditCard className="w-3.5 h-3.5" />
+                  <span>4. สลิปการโอนเงิน &amp; สถานะการตรวจสอบ</span>
+                </h4>
+
+                <div className="grid grid-cols-1 sm:grid-cols-12 gap-4 items-start">
+                  <div className="sm:col-span-4 space-y-2">
+                    <label className="block font-semibold text-slate-700">ภาพสลิปโอนเงิน</label>
+                    <div className="p-3 border-2 border-dashed border-slate-300 rounded-xl bg-slate-50 flex flex-col items-center justify-center text-center">
+                      {newRegistrationForm.slipImage ? (
+                        <div className="w-24 h-32 rounded border border-slate-200 overflow-hidden mb-2">
+                          <img
+                            src={newRegistrationForm.slipImage}
+                            alt="Slip"
+                            className="w-full h-full object-cover"
+                          />
+                        </div>
+                      ) : (
+                        <div className="py-4 text-slate-400">
+                          <ImageIcon className="w-8 h-8 mx-auto mb-1 text-slate-300" />
+                          <span className="text-[11px]">ไม่มีภาพสลิป</span>
+                        </div>
+                      )}
+                      <label className="w-full py-1.5 px-3 rounded-lg bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 font-semibold text-xs cursor-pointer text-center">
+                        <span>เลือกรูปภาพ</span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          onChange={(e) => {
+                            const f = e.target.files?.[0];
+                            if (!f) return;
+                            const reader = new FileReader();
+                            reader.onload = (ev) => {
+                              const dataUrl = ev.target?.result as string;
+                              if (dataUrl) {
+                                setNewRegistrationForm({
+                                  ...newRegistrationForm,
+                                  slipImage: dataUrl,
+                                });
+                              }
+                            };
+                            reader.readAsDataURL(f);
+                          }}
+                        />
+                      </label>
+                    </div>
+                  </div>
+
+                  <div className="sm:col-span-8 space-y-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block font-semibold text-slate-700 mb-1">ยอดชำระสุทธิ (บาท)</label>
+                        <input
+                          type="number"
+                          value={newRegistrationForm.totalAmount}
+                          onChange={(e) =>
+                            setNewRegistrationForm({
+                              ...newRegistrationForm,
+                              totalAmount: Number(e.target.value) || 0,
+                            })
+                          }
+                          className="w-full px-3 py-2 rounded-lg border border-slate-300 font-mono font-bold text-[#0F4E7A]"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block font-semibold text-slate-700 mb-1">สถานะการตรวจสอบ</label>
+                        <select
+                          value={newRegistrationForm.status || 'ยังไม่ตรวจสอบ'}
+                          onChange={(e) =>
+                            setNewRegistrationForm({
+                              ...newRegistrationForm,
+                              status: e.target.value as VerificationStatus,
+                            })
+                          }
+                          className={`w-full px-3 py-2 rounded-lg border font-bold ${
+                            newRegistrationForm.status === 'ตรวจสอบแล้ว'
+                              ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
+                              : 'border-amber-300 bg-amber-50 text-amber-800'
+                          }`}
+                        >
+                          <option value="ยังไม่ตรวจสอบ">ยังไม่ตรวจสอบ</option>
+                          <option value="ตรวจสอบแล้ว">ตรวจสอบแล้ว</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">หมายเหตุเจ้าหน้าที่ / แอดมิน</label>
+                      <textarea
+                        rows={2}
+                        value={newRegistrationForm.notes || ''}
+                        onChange={(e) =>
+                          setNewRegistrationForm({
+                            ...newRegistrationForm,
+                            notes: e.target.value,
+                          })
+                        }
+                        placeholder="บันทึกช่วยจำสำหรับเจ้าหน้าที่"
+                        className="w-full px-3 py-1.5 rounded-lg border border-slate-300 text-xs"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-4 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setIsNewRegistrationModalOpen(false)}
+                  className="px-4 py-2 rounded-xl border border-slate-300 text-slate-600 hover:bg-slate-50 font-medium cursor-pointer"
+                >
+                  ยกเลิก
+                </button>
+                <button
+                  type="submit"
+                  className="px-6 py-2 rounded-xl bg-[#0F4E7A] text-white hover:bg-[#0c3e61] font-bold shadow-xs flex items-center gap-2 cursor-pointer"
+                >
+                  <Check className="w-4 h-4 text-[#EDBA48]" />
+                  <span>เพิ่มผู้สมัครและบันทึกลง Google Sheets</span>
                 </button>
               </div>
             </form>
