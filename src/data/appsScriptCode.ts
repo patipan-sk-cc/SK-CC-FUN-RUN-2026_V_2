@@ -173,6 +173,68 @@ function doPost(e) {
       return jsonResponse({ status: 'error', message: 'Registration not found' });
     }
 
+    if (action === 'updateRegistration') {
+      const reg = payload.data;
+      const sheet = getOrCreateSheet();
+      const data = sheet.getDataRange().getValues();
+
+      let slipUrl = reg.driveFileUrl || reg.slipImage || '';
+      if (reg.slipBase64 && reg.slipBase64.startsWith('data:image')) {
+        slipUrl = uploadSlipToDrive(reg.id, reg.fullName, reg.slipBase64);
+      }
+
+      let fullAddress = 'รับด้วยตัวเอง ณ วิทยาลัยชุมชนสงขลา';
+      if (reg.deliveryType === 'postal' && reg.address) {
+        const a = reg.address;
+        fullAddress = [
+          'บ้านเลขที่ ' + (a.houseNo || '-'),
+          a.moo ? 'หมู่ ' + a.moo : '',
+          a.village ? 'ม.' + a.village : '',
+          a.soi ? 'ซ.' + a.soi : '',
+          a.road ? 'ถ.' + a.road : '',
+          'ต.' + (a.subdistrict || '-'),
+          'อ.' + (a.district || '-'),
+          'จ.' + (a.province || '-'),
+          a.postalCode || '',
+          a.note ? '(หมายเหตุ: ' + a.note + ')' : ''
+        ].filter(Boolean).join(' ');
+      }
+
+      for (let i = 1; i < data.length; i++) {
+        if (data[i][0] === reg.id) {
+          const rowNum = i + 1;
+          const updatedRow = [
+            reg.id,
+            data[i][1] || new Date().toLocaleString('th-TH'),
+            reg.prefix,
+            reg.fullName,
+            "'" + reg.phone,
+            reg.applicantType,
+            reg.applicantPrice,
+            reg.studentYear || '-',
+            reg.studentRoom || '-',
+            reg.studentMajor || '-',
+            reg.learningLocation || '-',
+            reg.shirtSize,
+            reg.deliveryType === 'pickup' ? 'รับด้วยตัวเอง' : 'จัดส่งไปรษณีย์',
+            reg.deliveryFee || 0,
+            reg.totalAmount || 0,
+            fullAddress,
+            slipUrl,
+            reg.status || 'ยังไม่ตรวจสอบ',
+            reg.notes || ''
+          ];
+          sheet.getRange(rowNum, 1, 1, updatedRow.length).setValues([updatedRow]);
+          return jsonResponse({
+            status: 'success',
+            message: 'อัปเดตข้อมูลผู้สมัครใน Google Sheets เรียบร้อยแล้ว',
+            driveSlipUrl: slipUrl
+          });
+        }
+      }
+      return jsonResponse({ status: 'error', message: 'Registration not found' });
+    }
+
     return jsonResponse({ status: 'error', message: 'Invalid action' });
   } catch (error) {
     return jsonResponse({ status: 'error', message: error.toString() });
