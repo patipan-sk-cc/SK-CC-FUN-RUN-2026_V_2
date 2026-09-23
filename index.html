@@ -1,21 +1,65 @@
-<!doctype html>
-<html lang="th">
+<!DOCTYPE html>
+<html>
   <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>SK-CC วิ่งให้ FUN 2026</title>
-    <meta name="description" content="ระบบลงทะเบียนและตรวจสอบการสมัคร เดิน-วิ่ง เพื่อสุขภาพ SK-CC วิ่งให้ FUN 2026 วิทยาลัยชุมชนสงขลา" />
-    <meta property="og:title" content="SK-CC วิ่งให้ FUN 2026" />
-    <meta property="og:description" content="ระบบลงทะเบียนและตรวจสอบการสมัคร เดิน-วิ่ง เพื่อสุขภาพ SK-CC วิ่งให้ FUN 2026 วิทยาลัยชุมชนสงขลา" />
-    <meta property="og:type" content="website" />
-    <meta name="twitter:card" content="summary_large_image" />
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <base target="_top">
+    <meta charset="UTF-8">
+    <title>SK-CC วิ่งให้ FUN 2026 - Data Bridge</title>
+    <style>
+      body {
+        font-family: 'Prompt', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        background: #f8fafc;
+        color: #0F4E7A;
+        padding: 40px 20px;
+        text-align: center;
+      }
+      .card {
+        background: white;
+        border-radius: 16px;
+        padding: 32px;
+        max-width: 540px;
+        margin: 0 auto;
+        box-shadow: 0 10px 25px rgba(15, 78, 122, 0.1);
+        border: 2px solid #EDBA48;
+      }
+      h1 { font-size: 24px; margin-bottom: 8px; color: #0F4E7A; }
+      p { color: #475569; font-size: 14px; line-height: 1.6; }
+      .status-pill {
+        display: inline-block;
+        background: #ecfdf5;
+        color: #059669;
+        font-weight: 600;
+        padding: 6px 16px;
+        border-radius: 9999px;
+        font-size: 14px;
+        margin: 16px 0;
+        border: 1px solid #a7f3d0;
+      }
+      .btn {
+        background: #0F4E7A;
+        color: white;
+        border: none;
+        padding: 10px 24px;
+        border-radius: 8px;
+        font-size: 15px;
+        cursor: pointer;
+        font-weight: 500;
+        text-decoration: none;
+        display: inline-block;
+        margin-top: 12px;
+      }
+      .btn:hover { background: #0c3e61; }
+    </style>
   </head>
-  <body class="font-sans antialiased text-slate-800 bg-slate-50 min-h-screen selection:bg-[#EDBA48] selection:text-[#0F4E7A]">
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+  <body>
+    <div class="card">
+      <div style="font-size: 44px; margin-bottom: 12px;">🏃‍♂️💨</div>
+      <h1>SK-CC วิ่งให้ FUN 2026</h1>
+      <p>วิทยาลัยชุมชนสงขลา (Songkhla Community College)</p>
+      <div class="status-pill">● Google Apps Script Web App ทำงานปกติ (Online)</div>
+      <p>Web App นี้ทำหน้าที่เป็นตัวกลางรับข้อมูลการสมัคร บันทึกลง Google Sheets และส่งไฟล์ภาพสลิปไปยัง Google Drive โฟลเดอร์ <strong>SKCC_FunRun_2026_Slips</strong></p>
+      <a href="<?= SpreadsheetApp.getActiveSpreadsheet().getUrl() ?>" target="_blank" class="btn">
+        เปิดดู Google Sheets
+      </a>
+    </div>
   </body>
 </html>
-
